@@ -1,0 +1,47 @@
+name: Deploy lambda
+
+# Keyless deploy via GitHub OIDC -> an AWS IAM role (no AWS secrets stored in
+# GitHub). Set repository variable AWS_DEPLOY_ROLE_ARN to the role created by
+# aws/setup_github_oidc.sh. Infra (S3/IAM/API Gateway) is provisioned once with
+# aws/deploy.sh; this workflow only updates function code+config (update_code.sh).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'find-similar/**'
+      - 'common/**'
+      - 'aws/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to deploy
+        type: choice
+        options:
+          - find-similar
+          # - go        # uncomment once the GO lambda is provisioned
+        default: find-similar
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update lambda code
+        run: ./aws/update_code.sh "${{ inputs.service || 'find-similar' }}"

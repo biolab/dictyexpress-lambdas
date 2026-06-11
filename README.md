@@ -53,6 +53,26 @@ No Docker.
 2. Set its `service.env` (`FUNCTION_NAME`, `ROUTE`, `NEEDS_S3`, `LAMBDA_ENV`).
 3. `cd aws && ./deploy.sh new-service && ./cloudfront_attach.sh new-service <api-id>`.
 
+## Continuous deployment (GitHub Actions)
+
+Pushes to `main` auto-deploy via `.github/workflows/deploy.yml`, using **GitHub
+OIDC** — no AWS keys are stored in GitHub. The workflow only updates function
+code+config (`aws/update_code.sh`); infra is provisioned once with `deploy.sh`.
+
+One-time connection (run locally with admin AWS creds):
+
+```bash
+cd aws
+./deploy.sh find-similar            # provision infra once (if not already done)
+./setup_github_oidc.sh              # creates the OIDC provider + scoped IAM role
+```
+
+Then set the printed role ARN as a GitHub **repository variable**
+`AWS_DEPLOY_ROLE_ARN` (Settings > Secrets and variables > Actions > Variables).
+The role is scoped to this repo's `main` branch and may only update code on the
+named lambda functions. You can also trigger a deploy manually from the Actions
+tab (workflow_dispatch).
+
 ## Local development (find-similar)
 
 ```bash
