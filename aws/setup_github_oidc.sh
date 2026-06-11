@@ -66,7 +66,7 @@ RESOURCES="[${RESOURCES%,}]"
 PERMS=$(cat <<JSON
 {"Version":"2012-10-17","Statement":[{
   "Effect":"Allow",
-  "Action":["lambda:GetFunction","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration"],
+  "Action":["lambda:GetFunction","lambda:GetFunctionConfiguration","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration"],
   "Resource":${RESOURCES}
 }]}
 JSON
