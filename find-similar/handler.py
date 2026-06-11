@@ -69,8 +69,34 @@ def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.
     return matrix
 
 
+def _preload() -> None:
+    """Load the default dataset into the cache at cold start.
+
+    Every user lands on the default time series first, so warming it during init
+    means that common request is served instantly instead of paying an S3 fetch.
+    Best-effort: any failure (missing matrix, no creds) is logged and ignored.
+    """
+    raw = os.environ.get("PRELOAD_TIME_SERIES", "").strip()
+    if not raw:
+        return
+    for token in raw.replace(",", " ").split():
+        try:
+            load_matrix(int(token), [])
+            print(f"preloaded matrix {token}")
+        except Exception as error:  # noqa: BLE001
+            print(f"preload skipped for {token}: {type(error).__name__}: {error}")
+
+
+_preload()
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Handle one fast find-similar request."""
+    # Keep-warm pings (EventBridge schedule sends {"warmup": true}) short-circuit
+    # before any parsing — they exist only to keep a container + its cache hot.
+    if event.get("warmup"):
+        return {"warm": True}
+
     origin = request_origin(event)
     allow_headers = requested_headers(event)
 

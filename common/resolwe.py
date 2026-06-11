@@ -91,3 +91,44 @@ def get_data(data_ids: list[int]) -> list[dict]:
 def get_storage(storage_id: int) -> dict:
     """Fetch a storage object (its `json` field holds the payload)."""
     return get_json(f"api/storage/{storage_id}")
+
+
+def list_time_series(community: str = "bcm") -> list[dict]:
+    """List all time-series relations for a community."""
+    return _as_list(
+        get_json("api/relation", {"category": "Time series", "tags": f"community:{community}"})
+    )
+
+
+def expression_data_ids_for_relation(relation: dict) -> list[int]:
+    """Resolve a relation's expression Data ids (one per sample/entity).
+
+    The frontend normally supplies these on a request; this lets us build a
+    matrix offline (prebuild) or whenever they are not provided. Each entity in
+    the relation's partitions has an expression Data object carrying
+    `output.exp_json`; if an entity has several, the newest (highest id) wins.
+    """
+    entities = sorted({int(p["entity"]) for p in relation.get("partitions", [])})
+    if not entities:
+        return []
+
+    rows = _as_list(
+        get_json(
+            "api/data",
+            {"entity__in": ",".join(map(str, entities)), "limit": max(200, len(entities) * 3)},
+        )
+    )
+
+    newest_by_entity: dict[int, dict] = {}
+    for data in rows:
+        if "exp_json" not in (data.get("output") or {}):
+            continue
+        entity = data.get("entity")
+        entity_id = entity.get("id") if isinstance(entity, dict) else entity
+        if entity_id is None:
+            continue
+        entity_id = int(entity_id)
+        if entity_id not in newest_by_entity or int(data["id"]) > int(newest_by_entity[entity_id]["id"]):
+            newest_by_entity[entity_id] = data
+
+    return [int(newest_by_entity[e]["id"]) for e in sorted(newest_by_entity)]
