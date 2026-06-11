@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build / deploy artifacts
+aws/build/
+aws/dist/
+*.zip
+
+# Precomputed matrices are data, served from S3 — not source. Rebuild with
+# build_matrix.py or let the lambda/local server lazy-build them.
+**/matrices/*.npz
+
+# Local captures / scratch
+*.har
