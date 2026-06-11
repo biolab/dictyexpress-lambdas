@@ -115,6 +115,15 @@ aws lambda add-permission --function-name "${FUNCTION_NAME}" \
 API_ENDPOINT=$(aws apigatewayv2 get-api --api-id "${API_ID}" --region "${AWS_REGION}" \
   --query 'ApiEndpoint' --output text)
 
+# Throttle the public endpoint so abuse can't run up cost (default route settings
+# on the auto-deployed $default stage).
+if [ -n "${THROTTLE_RATE:-}" ] && [ -n "${THROTTLE_BURST:-}" ]; then
+  echo "Setting throttle: ${THROTTLE_RATE} req/s, burst ${THROTTLE_BURST}"
+  aws apigatewayv2 update-stage --api-id "${API_ID}" --stage-name '$default' \
+    --default-route-settings "ThrottlingRateLimit=${THROTTLE_RATE},ThrottlingBurstLimit=${THROTTLE_BURST}" \
+    --region "${AWS_REGION}" >/dev/null
+fi
+
 echo
 echo "=================================================================="
 echo "Deployed ${SERVICE}. API Gateway endpoint:"
