@@ -26,6 +26,34 @@ def response(
     Allowed request headers are reflected from the preflight (the dev client adds
     X-CSRFToken), falling back to the common set.
     """
+    return {
+        "statusCode": status_code,
+        "headers": _cors_headers(origin, allow_headers),
+        "body": json.dumps(body),
+    }
+
+
+def response_raw(
+    status_code: int,
+    json_body: str,
+    origin: str | None = None,
+    allow_headers: str | None = None,
+) -> dict[str, Any]:
+    """Like response() but the body is already-serialized JSON.
+
+    Lets a handler pass an engine's JSON output straight through instead of
+    parsing then re-serializing it (avoids doubling memory/CPU for large results).
+    """
+    return {
+        "statusCode": status_code,
+        "headers": _cors_headers(origin, allow_headers),
+        "body": json_body,
+    }
+
+
+def _cors_headers(origin: str | None, allow_headers: str | None) -> dict[str, str]:
+    """CORS headers: reflect a credentialed origin (browsers reject "*" with
+    credentials) and the requested headers; cache the preflight."""
     headers = {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": origin or "*",
@@ -38,11 +66,7 @@ def response(
     }
     if origin:
         headers["Access-Control-Allow-Credentials"] = "true"
-    return {
-        "statusCode": status_code,
-        "headers": headers,
-        "body": json.dumps(body),
-    }
+    return headers
 
 
 def request_origin(event: dict[str, Any]) -> str | None:

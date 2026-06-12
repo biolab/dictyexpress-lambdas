@@ -60,23 +60,10 @@ static vector<struct int_term_t*> roots;
 float_type *logs;
 int nlogs;
 
-/* Over-representation p-value: upper-tail hypergeometric P(X >= k).
- *
- * IMPROVEMENT over upstream gotea, which returned only the single-point PMF
- * P(X = k). Summing the tail [k .. min(n,K)] is the standard GO over-
- * representation test (Fisher's exact / hypergeometric), matching topGO, GOstats,
- * etc. All other gotea logic (tree/DAG, score, associations) is unchanged.
- */
 static inline float_type hypergeometric(int k, int n, int K, int N)
 {
-	float_type sum=0.0;
-	int upper = (n < K) ? n : K;
-	for (int i=k; i<=upper; i++)
-	{
-		sum += exp((logs[K] + logs[N-K] + logs[n] + logs[N-n]) -
-			(logs[i] + logs[K-i] + logs[n-i] + logs[N-K-n+i] + logs[N]));
-	}
-	return sum > 1.0 ? 1.0 : sum;
+	return exp((logs[K] + logs[N-K] + logs[n] + logs[N-n]) -
+		(logs[k] + logs[K-k] + logs[n-k] + logs[N-K-n+k] + logs[N]));
 }
 
 static inline float_type score(int matched_genes, int assoc_genes, int input_genes_num, int all_genes)

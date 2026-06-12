@@ -30,6 +30,7 @@ from common.http import (
     request_origin,
     requested_headers,
     response,
+    response_raw,
 )
 from common.resolwe import ResolweError, map_gene_ids
 
@@ -63,8 +64,8 @@ def _gaf_meta(species: str) -> dict:
 
 def run_enrichment(
     genes: list[str], source: str, species: str, pval: float, min_genes: int
-) -> dict[str, Any]:
-    """Map ids if needed, run the gotea processor, return its parsed JSON."""
+) -> bytes:
+    """Map ids if needed, run the gotea processor, return its JSON output (bytes)."""
     meta = _gaf_meta(species)
     gaf_source = meta["gaf_source"]
 
@@ -84,12 +85,16 @@ def run_enrichment(
     with tempfile.NamedTemporaryFile("w", suffix=".txt") as genes_file:
         genes_file.write(" ".join(target_ids))
         genes_file.flush()
+        # OMP_NUM_THREADS=1: the engine uses OpenMP, but Lambda has ~1-2 vCPUs and
+        # the parallelism gives little benefit while risking thread-related crashes.
         result = subprocess.run(
             [PROCESSOR, str(pval), str(min_genes), obo_obj, gaf_obj, genes_file.name],
             capture_output=True,
             check=True,
+            env={**os.environ, "OMP_NUM_THREADS": "1"},
         )
-    return json.loads(result.stdout)
+    # The processor already emits valid JSON; pass it through (no parse/re-serialize).
+    return result.stdout
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -114,7 +119,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         print(f"REQ go genes={len(genes)} source={source} species={species} pval={pval}")
         result = run_enrichment(genes, source, species, pval, min_genes)
-        return response(200, result, origin, allow_headers)
+        return response_raw(200, result.decode("utf-8"), origin, allow_headers)
     except ResolweError as error:
         print(f"FAIL 404 ResolweError: {error}")
         return response(404, {"error": str(error)}, origin, allow_headers)
