@@ -23,11 +23,6 @@ def load_npz_matrix(path: Path | str) -> Matrix:
         "expression": np.asarray(loaded["expression"], dtype=np.float64),
         "rank_expression": np.asarray(loaded["rank_expression"], dtype=np.float64),
         "timepoints": loaded["timepoints"],
-        **(
-            {"expression_ids": np.asarray(loaded["expression_ids"], dtype=np.int64)}
-            if "expression_ids" in loaded
-            else {}
-        ),
     }
 
 
