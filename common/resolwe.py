@@ -93,6 +93,44 @@ def get_storage(storage_id: int) -> dict:
     return get_json(f"api/storage/{storage_id}")
 
 
+def post_json(path: str, body: dict[str, Any], timeout: int = 30) -> Any:
+    """POST a JSON body to an API path and parse the JSON response."""
+    url = f"{base_url()}/{path.lstrip('/')}"
+    data = json.dumps(body).encode()
+    headers = {**auth_headers(), "Content-Type": "application/json"}
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as error:
+        raise ResolweError(f"Resolwe POST failed ({error.code}) for {path}.") from error
+    except urllib.error.URLError as error:
+        raise ResolweError(f"Resolwe POST failed for {path}: {error}") from error
+
+
+def map_gene_ids(
+    source_db: str, target_db: str, species: str, gene_ids: list[str]
+) -> dict[str, str]:
+    """Map gene ids between databases via the public knowledge-base endpoint.
+
+    Returns {source_id: target_id}. Used for GO enrichment when the query genes'
+    database differs from the GAF's (e.g. DICTYBASE query -> UniProtKB GAF).
+    """
+    if not gene_ids:
+        return {}
+    rows = post_json(
+        "api/kb/mapping/search",
+        {
+            "source_db": source_db,
+            "target_db": target_db,
+            "source_species": species,
+            "target_species": species,
+            "source_id__in": ",".join(gene_ids),
+        },
+    )
+    return {r["source_id"]: r["target_id"] for r in rows if "source_id" in r and "target_id" in r}
+
+
 def list_time_series(community: str = "bcm") -> list[dict]:
     """List all time-series relations for a community."""
     return _as_list(

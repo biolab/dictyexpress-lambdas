@@ -30,5 +30,12 @@ for f in "${SERVICE_DIR}"/*.py; do
   cp "$f" "${BUILD_DIR}/"
 done
 
+# Native runtime binary (e.g. gotea `processor` for GO): compile + bundle it.
+if [ -x "${SERVICE_DIR}/compile.sh" ]; then
+  echo "Compiling native binaries for ${SERVICE}..."
+  "${SERVICE_DIR}/compile.sh" "${SERVICE_DIR}/bin"
+  [ -f "${SERVICE_DIR}/bin/processor" ] && cp "${SERVICE_DIR}/bin/processor" "${BUILD_DIR}/"
+fi
+
 ( cd "${BUILD_DIR}" && zip -qr "${ZIP_PATH}" . -x '*/__pycache__/*' '*.pyc' )
 echo "Built ${ZIP_PATH} ($(du -h "${ZIP_PATH}" | cut -f1))"

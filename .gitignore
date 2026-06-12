@@ -15,3 +15,11 @@ aws/dist/
 
 # Local captures / scratch
 *.har
+
+# GO: downloaded source data, extracted gotea sources, compiled binaries, artifacts
+go/_data/
+go/_gotea/
+go/bin/
+*.obo
+*.obo_obj
+*_obj

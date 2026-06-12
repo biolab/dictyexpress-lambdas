@@ -15,24 +15,24 @@ echo
 # 1. Optional S3 bucket (private, versioned, AES256). Only if NEEDS_S3=true.
 # ---------------------------------------------------------------------------
 if [ "${NEEDS_S3}" = "true" ]; then
-  : "${MATRIX_BUCKET:?NEEDS_S3=true requires MATRIX_BUCKET}"
-  if aws s3api head-bucket --bucket "${MATRIX_BUCKET}" 2>/dev/null; then
-    echo "Bucket already exists: ${MATRIX_BUCKET}"
+  : "${BUCKET:?NEEDS_S3=true requires BUCKET}"
+  if aws s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+    echo "Bucket already exists: ${BUCKET}"
   else
-    echo "Creating bucket ${MATRIX_BUCKET}..."
+    echo "Creating bucket ${BUCKET}..."
     if [ "${AWS_REGION}" = "us-east-1" ]; then
-      aws s3api create-bucket --bucket "${MATRIX_BUCKET}" --region us-east-1
+      aws s3api create-bucket --bucket "${BUCKET}" --region us-east-1
     else
-      aws s3api create-bucket --bucket "${MATRIX_BUCKET}" --region "${AWS_REGION}" \
+      aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}" \
         --create-bucket-configuration LocationConstraint="${AWS_REGION}"
     fi
   fi
-  aws s3api put-public-access-block --bucket "${MATRIX_BUCKET}" \
+  aws s3api put-public-access-block --bucket "${BUCKET}" \
     --public-access-block-configuration \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-  aws s3api put-bucket-versioning --bucket "${MATRIX_BUCKET}" \
+  aws s3api put-bucket-versioning --bucket "${BUCKET}" \
     --versioning-configuration Status=Enabled
-  aws s3api put-bucket-encryption --bucket "${MATRIX_BUCKET}" \
+  aws s3api put-bucket-encryption --bucket "${BUCKET}" \
     --server-side-encryption-configuration \
     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 fi
@@ -52,7 +52,7 @@ else
   echo "Waiting for role to propagate..."; sleep 10
 fi
 if [ "${NEEDS_S3}" = "true" ]; then
-  S3_POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::${MATRIX_BUCKET}\",\"arn:aws:s3:::${MATRIX_BUCKET}/*\"]}]}"
+  S3_POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::${BUCKET}\",\"arn:aws:s3:::${BUCKET}/*\"]}]}"
   aws iam put-role-policy --role-name "${ROLE_NAME}" \
     --policy-name "${SERVICE}-s3" --policy-document "${S3_POLICY}"
 fi
