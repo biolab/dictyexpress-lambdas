@@ -31,6 +31,9 @@ def response(
         "Access-Control-Allow-Origin": origin or "*",
         "Access-Control-Allow-Headers": allow_headers or "Content-Type,X-CSRFToken",
         "Access-Control-Allow-Methods": "POST,OPTIONS",
+        # Let the browser cache the preflight so repeat calls skip the OPTIONS
+        # round-trip (matters when the GO panel recomputes on gene changes).
+        "Access-Control-Max-Age": "86400",
         "Vary": "Origin",
     }
     if origin:
