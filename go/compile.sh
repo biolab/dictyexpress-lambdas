@@ -18,8 +18,9 @@ if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] && command -v g++ >/dev/null 2
   g++ $CXXFLAGS $PROC_SRC -fopenmp -fwhole-program -o "$OUT/processor"
   g++ $CXXFLAGS $PRE_SRC -o "$OUT/preprocessor"
 else
-  echo "Compiling via docker (x86_64)..."
-  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w gcc:12 bash -c "
+  IMG="${GOTEA_BUILD_IMAGE:-gcc:12}"
+  echo "Compiling via docker (x86_64, ${IMG})..."
+  docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w --entrypoint bash "$IMG" -c "
     g++ $CXXFLAGS $PROC_SRC -fopenmp -fwhole-program -o $OUT/processor &&
     g++ $CXXFLAGS $PRE_SRC -o $OUT/preprocessor"
 fi

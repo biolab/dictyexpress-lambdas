@@ -31,9 +31,11 @@ for f in "${SERVICE_DIR}"/*.py; do
 done
 
 # Native runtime binary (e.g. gotea `processor` for GO): compile + bundle it.
+# compile.sh writes to its own bin/ (relative, so it works inside the build
+# container too); we copy only the runtime binary into the zip.
 if [ -x "${SERVICE_DIR}/compile.sh" ]; then
   echo "Compiling native binaries for ${SERVICE}..."
-  "${SERVICE_DIR}/compile.sh" "${SERVICE_DIR}/bin"
+  ( cd "${SERVICE_DIR}" && ./compile.sh )
   [ -f "${SERVICE_DIR}/bin/processor" ] && cp "${SERVICE_DIR}/bin/processor" "${BUILD_DIR}/"
 fi
 
