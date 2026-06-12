@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import io
 import os
+import hashlib
 import traceback
-from typing import Any
+from typing import Any, Hashable
 
 import boto3
 import numpy as np
@@ -33,9 +34,38 @@ RESULT_LIMIT = int(os.environ.get("FIND_SIMILAR_TOP_N", "0")) or None
 MATRIX_CACHE = LruCache(CACHE_MB * 1024 * 1024)
 
 
-def _matrix_key(time_series_id: int) -> str:
+def _normalized_expression_ids(expression_ids: list[int]) -> tuple[int, ...]:
+    return tuple(sorted(int(expression_id) for expression_id in expression_ids))
+
+
+def _expression_ids_digest(expression_ids: tuple[int, ...]) -> str:
+    payload = ",".join(str(expression_id) for expression_id in expression_ids).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _matrix_key(time_series_id: int, expression_ids: tuple[int, ...] = ()) -> str:
     prefix = os.environ.get("MATRIX_PREFIX", "matrices").strip("/")
+    if expression_ids:
+        digest = _expression_ids_digest(expression_ids)
+        return f"{prefix}/{time_series_id}-{len(expression_ids)}-{digest}.npz"
     return f"{prefix}/{time_series_id}.npz"
+
+
+def _cache_key(time_series_id: int, expression_ids: tuple[int, ...]) -> Hashable:
+    return (time_series_id, expression_ids)
+
+
+def _matrix_matches_request(
+    matrix: dict[str, np.ndarray], expression_ids: tuple[int, ...]
+) -> bool:
+    if not expression_ids:
+        return True
+
+    matrix_expression_ids = matrix.get("expression_ids")
+    if matrix_expression_ids is None:
+        return False
+
+    return tuple(sorted(int(i) for i in matrix_expression_ids.tolist())) == expression_ids
 
 
 def _persist_matrix(bucket: str, key: str, matrix: dict[str, np.ndarray]) -> None:
@@ -47,12 +77,15 @@ def _persist_matrix(bucket: str, key: str, matrix: dict[str, np.ndarray]) -> Non
 
 def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.ndarray]:
     """Resolve a matrix: warm-LRU -> S3 -> lazy build from Resolwe (then persist)."""
-    cached = MATRIX_CACHE.get(time_series_id)
+    normalized_expression_ids = _normalized_expression_ids(expression_ids)
+    cache_key = _cache_key(time_series_id, normalized_expression_ids)
+
+    cached = MATRIX_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     bucket = os.environ["MATRIX_BUCKET"]
-    key = _matrix_key(time_series_id)
+    key = _matrix_key(time_series_id, normalized_expression_ids)
 
     try:
         obj = S3.get_object(Bucket=bucket, Key=key)
@@ -60,12 +93,31 @@ def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.
     except ClientError as error:
         if error.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
             raise
-        # Not in S3 yet: build it from Resolwe on demand, then cache to S3 so
-        # this dataset (and any new dataset) is fast on every later request.
-        matrix = build_matrix_from_resolwe(time_series_id, expression_ids)
-        _persist_matrix(bucket, key, matrix)
 
-    MATRIX_CACHE.put(time_series_id, matrix)
+        legacy_key = _matrix_key(time_series_id)
+        matrix = None
+        if normalized_expression_ids and legacy_key != key:
+            try:
+                obj = S3.get_object(Bucket=bucket, Key=legacy_key)
+                candidate = load_npz_matrix(io.BytesIO(obj["Body"].read()))
+                if _matrix_matches_request(candidate, normalized_expression_ids):
+                    matrix = candidate
+            except ClientError as legacy_error:
+                if legacy_error.response.get("Error", {}).get("Code") not in (
+                    "NoSuchKey",
+                    "404",
+                ):
+                    raise
+
+        if matrix is None:
+            # Not in S3 yet: build it from Resolwe on demand, then cache to S3
+            # so this exact sample set is fast on every later request.
+            matrix = build_matrix_from_resolwe(time_series_id, expression_ids)
+            if normalized_expression_ids and "expression_ids" not in matrix:
+                matrix["expression_ids"] = np.array(normalized_expression_ids, dtype=np.int64)
+            _persist_matrix(bucket, key, matrix)
+
+    MATRIX_CACHE.put(cache_key, matrix)
     return matrix
 
 

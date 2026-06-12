@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from threading import Lock
-from typing import Optional
+from typing import Hashable, Optional
 
 import numpy as np
 
@@ -32,12 +32,12 @@ class LruCache:
 
     def __init__(self, max_bytes: int):
         self.max_bytes = max_bytes
-        self._store: "OrderedDict[int, Artifact]" = OrderedDict()
-        self._sizes: dict[int, int] = {}
+        self._store: "OrderedDict[Hashable, Artifact]" = OrderedDict()
+        self._sizes: dict[Hashable, int] = {}
         self._total = 0
         self._lock = Lock()
 
-    def get(self, key: int) -> Optional[Artifact]:
+    def get(self, key: Hashable) -> Optional[Artifact]:
         """Return a cached artifact and mark it most-recently-used."""
         with self._lock:
             artifact = self._store.get(key)
@@ -45,7 +45,7 @@ class LruCache:
                 self._store.move_to_end(key)
             return artifact
 
-    def put(self, key: int, artifact: Artifact) -> None:
+    def put(self, key: Hashable, artifact: Artifact) -> None:
         """Insert/replace an artifact and evict LRU entries past the byte cap."""
         with self._lock:
             if key in self._store:

@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -48,24 +49,57 @@ class MatrixStore:
 
     def get(self, time_series_id: int, expression_ids: list[int]) -> Matrix:
         """Return a matrix, loading or building it if not already cached."""
-        cached = self.cache.get(time_series_id)
+        normalized_expression_ids = tuple(sorted(expression_ids))
+        cache_key = (time_series_id, normalized_expression_ids)
+        cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
-        path = self.matrix_dir / f"{time_series_id}.npz"
+        path = self._matrix_path(time_series_id, normalized_expression_ids)
         if path.exists():
             matrix = load_npz_matrix(path)
+        elif normalized_expression_ids:
+            legacy_path = self.matrix_dir / f"{time_series_id}.npz"
+            if legacy_path.exists():
+                candidate = load_npz_matrix(legacy_path)
+                if self._matrix_matches_request(candidate, normalized_expression_ids):
+                    matrix = candidate
+                else:
+                    matrix = self._build_and_persist(
+                        time_series_id, expression_ids, path
+                    )
+            else:
+                matrix = self._build_and_persist(time_series_id, expression_ids, path)
         else:
             matrix = self._build_and_persist(time_series_id, expression_ids, path)
 
-        self.cache.put(time_series_id, matrix)
+        self.cache.put(cache_key, matrix)
         return matrix
+
+    def _matrix_path(self, time_series_id: int, expression_ids: tuple[int, ...]) -> Path:
+        """Return the artifact path for an exact request."""
+        if not expression_ids:
+            return self.matrix_dir / f"{time_series_id}.npz"
+        payload = ",".join(str(expression_id) for expression_id in expression_ids).encode()
+        digest = hashlib.sha256(payload).hexdigest()[:16]
+        return self.matrix_dir / f"{time_series_id}-{len(expression_ids)}-{digest}.npz"
+
+    def _matrix_matches_request(
+        self, matrix: Matrix, expression_ids: tuple[int, ...]
+    ) -> bool:
+        """Return whether a legacy artifact was built from this expression set."""
+        matrix_expression_ids = matrix.get("expression_ids")
+        if matrix_expression_ids is None:
+            return False
+        return tuple(sorted(int(i) for i in matrix_expression_ids.tolist())) == expression_ids
 
     def _build_and_persist(
         self, time_series_id: int, expression_ids: list[int], path: Path
     ) -> Matrix:
         """Build a matrix on demand from Resolwe and cache it to disk."""
         matrix = build_matrix_from_resolwe(time_series_id, expression_ids)
+        if expression_ids and "expression_ids" not in matrix:
+            matrix["expression_ids"] = np.array(sorted(expression_ids), dtype=np.int64)
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(path, **matrix)
         print(f"Built and cached matrix for time series {time_series_id} -> {path}")

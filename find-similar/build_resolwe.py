@@ -66,4 +66,6 @@ def build_matrix_from_resolwe(
             f"Could not assemble any expression samples for time series {time_series_id}."
         )
 
-    return build_matrix_arrays(relation, samples)
+    matrix = build_matrix_arrays(relation, samples)
+    matrix["expression_ids"] = np.array(sorted(expression_ids), dtype=np.int64)
+    return matrix
