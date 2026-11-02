@@ -14,6 +14,7 @@ if ! aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_
 fi
 
 "${AWS_DIR}/build.sh" "${SERVICE}"
+stage_code
 
 ENV_ARGS=()
 if [ -n "${LAMBDA_ENV:-}" ]; then
@@ -22,7 +23,7 @@ fi
 
 echo "Updating code for ${FUNCTION_NAME}..."
 aws lambda update-function-code --function-name "${FUNCTION_NAME}" \
-  --zip-file "fileb://${ZIP_PATH}" --region "${AWS_REGION}" >/dev/null
+  "${UPDATE_CODE_ARGS[@]}" --region "${AWS_REGION}" >/dev/null
 aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 
 aws lambda update-function-configuration --function-name "${FUNCTION_NAME}" \

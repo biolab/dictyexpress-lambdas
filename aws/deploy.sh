@@ -62,6 +62,7 @@ ROLE_ARN=$(aws iam get-role --role-name "${ROLE_NAME}" --query 'Role.Arn' --outp
 # 3. Build the package
 # ---------------------------------------------------------------------------
 "${AWS_DIR}/build.sh" "${SERVICE}"
+stage_code
 
 # Lambda env vars (space-separated KEY=VALUE pairs in LAMBDA_ENV -> --environment).
 ENV_ARGS=()
@@ -75,7 +76,7 @@ fi
 if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
   echo "Updating function code + config..."
   aws lambda update-function-code --function-name "${FUNCTION_NAME}" \
-    --zip-file "fileb://${ZIP_PATH}" --region "${AWS_REGION}" >/dev/null
+    "${UPDATE_CODE_ARGS[@]}" --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
   aws lambda update-function-configuration --function-name "${FUNCTION_NAME}" \
     --runtime "${LAMBDA_RUNTIME}" --handler "${HANDLER}" \
@@ -85,7 +86,7 @@ else
   echo "Creating function ${FUNCTION_NAME}..."
   aws lambda create-function --function-name "${FUNCTION_NAME}" \
     --runtime "${LAMBDA_RUNTIME}" --handler "${HANDLER}" \
-    --role "${ROLE_ARN}" --zip-file "fileb://${ZIP_PATH}" \
+    --role "${ROLE_ARN}" "${CREATE_CODE_ARGS[@]}" \
     --memory-size "${LAMBDA_MEMORY}" --timeout "${LAMBDA_TIMEOUT}" \
     --architectures x86_64 \
     "${ENV_ARGS[@]}" --region "${AWS_REGION}" >/dev/null

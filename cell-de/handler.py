@@ -9,9 +9,12 @@ from __future__ import annotations
 import io
 import os
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from time import perf_counter
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from common.cache import LruCache
@@ -26,10 +29,12 @@ from common.http import (
 from core import STRAIN_PATTERN, Cellwise, compare_cells, load_cellwise, result_to_json
 
 
-S3 = boto3.client("s3")
 # A strain's artifact is ~0.5 GB in memory; the cap decides how many stay warm.
 CACHE_MB = int(os.environ.get("MATRIX_CACHE_MB", "2048"))
 MATRIX_CACHE = LruCache(CACHE_MB * 1024 * 1024)
+FETCH_PART_BYTES = 16 * 1024 * 1024
+FETCH_THREADS = 16
+S3 = boto3.client("s3", config=Config(max_pool_connections=FETCH_THREADS))
 
 
 class StrainNotFound(Exception):
@@ -41,34 +46,57 @@ def _matrix_key(strain: str) -> str:
     return f"{prefix}/{strain}.npz"
 
 
+def _fetch(key: str) -> bytearray:
+    """Download an S3 object in parallel ranged parts (one stream tops out ~90 MB/s)."""
+    bucket = os.environ["MATRIX_BUCKET"]
+    size = S3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+    data = bytearray(size)
+
+    def part(start: int) -> None:
+        end = min(start + FETCH_PART_BYTES, size) - 1
+        body = S3.get_object(Bucket=bucket, Key=key, Range=f"bytes={start}-{end}")["Body"]
+        data[start : end + 1] = body.read()
+
+    with ThreadPoolExecutor(FETCH_THREADS) as pool:
+        list(pool.map(part, range(0, size, FETCH_PART_BYTES)))
+    return data
+
+
 def load_strain(strain: str) -> Cellwise:
     """Resolve a strain's cell-wise counts: warm-LRU -> S3."""
     cached = MATRIX_CACHE.get(strain)
     if cached is not None:
         return cached
 
+    started = perf_counter()
     try:
-        obj = S3.get_object(Bucket=os.environ["MATRIX_BUCKET"], Key=_matrix_key(strain))
+        raw = _fetch(_matrix_key(strain))
     except ClientError as error:
         if error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
             raise StrainNotFound(strain) from error
         raise
-    cellwise = load_cellwise(io.BytesIO(obj["Body"].read()))
+    fetched = perf_counter()
+    cellwise = load_cellwise(io.BytesIO(raw))
+    print(
+        f"loaded {strain}: {len(raw) / 1e6:.0f} MB fetched in {fetched - started:.2f}s, "
+        f"parsed in {perf_counter() - fetched:.2f}s"
+    )
     MATRIX_CACHE.put(strain, cellwise)
     return cellwise
 
 
-def _preload() -> None:
-    """Load the default strain at cold start (best-effort, like find-similar)."""
-    for strain in os.environ.get("PRELOAD_STRAINS", "").replace(",", " ").split():
+def _warm() -> None:
+    """Keep the strains users land on loaded (best-effort).
+
+    Runs on the keep-warm ping rather than at cold start: a strain's S3 fetch plus
+    parse can pass Lambda's 10 s init limit, and a timed-out init is rerun inside
+    the next request.
+    """
+    for strain in os.environ.get("WARM_STRAINS", "").replace(",", " ").split():
         try:
             load_strain(strain)
-            print(f"preloaded strain {strain}")
         except Exception as error:  # noqa: BLE001
-            print(f"preload skipped for {strain}: {type(error).__name__}: {error}")
-
-
-_preload()
+            print(f"warm skipped for {strain}: {type(error).__name__}: {error}")
 
 
 def _cell_indices(value: Any, field: str) -> list[int]:
@@ -82,6 +110,7 @@ def _cell_indices(value: Any, field: str) -> list[int]:
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Handle one selected-cells differential expression request."""
     if event.get("warmup"):
+        _warm()
         return {"warm": True}
 
     origin = request_origin(event)
