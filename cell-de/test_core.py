@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy import sparse, stats
 
-from build_cellwise import cellwise_from_csr
+from build_cellwise import cellwise_from_csr, time_totals
 from core import pseudobulk_counts
 from core import (
     MIN_REPLICATE_CELLS,
@@ -256,6 +256,25 @@ def test_replicate_test_is_quiet_on_random_cells(replicated):
 
     assert test["status"] == "ok"
     assert np.nansum(test["fdr"] < 0.05) == 0
+
+
+def test_same_time_reference_uses_time_totals(replicated):
+    cellwise, _ = replicated
+    times = [("t0", "t1", "t2")[cell % 3] for cell in range(1200)]
+    with_times = {**cellwise, **time_totals(cellwise, times)}
+    rng = np.random.default_rng(6)
+    selected = np.sort(rng.choice(np.flatnonzero(np.array(times) == "t1"), 120, replace=False))
+    whole = [cell for cell in range(1200) if times[cell] in ("t1", "t2")]  # includes selected
+    partial = whole[::2]
+
+    for reference in (whole, partial):
+        expected = compare_cells(cellwise, selected.tolist(), reference)
+        result = compare_cells(with_times, selected.tolist(), reference)
+        for key in ("cohens_d", "neg_log10_pvalue", "pct_reference"):
+            np.testing.assert_allclose(result[key], expected[key], rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(
+            result["replicate_test"]["pvalue"], expected["replicate_test"]["pvalue"], rtol=1e-9
+        )
 
 
 def test_replicate_test_needs_cells_in_two_replicates(replicated):

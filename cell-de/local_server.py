@@ -51,7 +51,8 @@ class CellwiseStore:
         path = self.matrix_dir / f"{strain}.npz"
         if not path.exists():
             raise FileNotFoundError(f"No single-cell data for strain {strain}")
-        cellwise = load_cellwise(path)
+        times_path = self.matrix_dir / f"{strain}.times.npz"
+        cellwise = load_cellwise(path, *([times_path] if times_path.exists() else []))
         self.cache.put(strain, cellwise)
         return cellwise
 

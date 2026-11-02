@@ -41,9 +41,13 @@ class StrainNotFound(Exception):
     """No cell-wise artifact exists for the requested strain."""
 
 
-def _matrix_key(strain: str) -> str:
+def _matrix_key(strain: str, suffix: str = ".npz") -> str:
     prefix = os.environ.get("MATRIX_PREFIX", "cellwise").strip("/")
-    return f"{prefix}/{strain}.npz"
+    return f"{prefix}/{strain}{suffix}"
+
+
+def _is_missing(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404")
 
 
 def _fetch(key: str) -> bytearray:
@@ -72,11 +76,19 @@ def load_strain(strain: str) -> Cellwise:
     try:
         raw = _fetch(_matrix_key(strain))
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+        if _is_missing(error):
             raise StrainNotFound(strain) from error
         raise
+    sources = [io.BytesIO(raw)]
+    # Time point totals make "same time points" references as cheap as "all other cells".
+    try:
+        sources.append(io.BytesIO(_fetch(_matrix_key(strain, ".times.npz"))))
+    except ClientError as error:
+        if not _is_missing(error):
+            raise
+        print(f"no time point totals for {strain}")
     fetched = perf_counter()
-    cellwise = load_cellwise(io.BytesIO(raw))
+    cellwise = load_cellwise(*sources)
     print(
         f"loaded {strain}: {len(raw) / 1e6:.0f} MB fetched in {fetched - started:.2f}s, "
         f"parsed in {perf_counter() - fetched:.2f}s"

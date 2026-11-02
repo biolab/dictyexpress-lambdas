@@ -16,6 +16,14 @@ artifact (built by build_cellwise.py from the app's gene-wise zarr):
     replicate_codes  int8  (n_cells,)               index into replicate_names, -1 if none
     replicate_counts float64 (n_replicates, n_genes) raw counts summed per replicate
 
+Time point totals live in a separate `<strain>.times.npz` (optional), so they can be
+rebuilt without re-uploading the counts:
+
+    time_names            str     (n_times,)                    time points
+    time_codes            int8    (n_cells,)                    index into time_names
+    time_gene_sum, time_gene_sumsq, time_gene_nnz  (n_times, n_genes)  gene_* per time point
+    time_replicate_counts float64 (n_times, n_replicates, n_genes)    replicate_counts per time point
+
 Values are normalized the scanpy way (scale each cell to TARGET_SUM counts, then
 log1p) and compared with scanpy's `t-test_overestim_var`: Welch's t-test with
 the reference group's variance scaled by the selected group's size instead of
@@ -30,7 +38,9 @@ below 1e-1000) and are returned for reference only. For one comparison, ranking 
 d and by the t statistic agree exactly: t is d scaled by a constant.
 
 The reference defaults to all other cells of the strain. Then only the smaller
-of the two groups is summed and the other is the precomputed totals minus it.
+of the two groups is summed and the other is the precomputed totals minus it. A
+reference that, with the selection, covers whole time points (the app's "same time
+points") is likewise the time point totals minus the selection.
 """
 
 from __future__ import annotations
@@ -62,10 +72,26 @@ MIN_REPLICATES = 2
 MIN_PSEUDOBULK_COUNT = 10
 
 
-def load_cellwise(source: Path | str | BinaryIO) -> Cellwise:
-    """Load a cell-wise counts artifact from a NumPy .npz file."""
-    loaded = np.load(source, allow_pickle=False)
-    return {key: loaded[key] for key in loaded.files}
+def load_cellwise(*sources: Path | str | BinaryIO) -> Cellwise:
+    """Load a cell-wise counts artifact from NumPy .npz files (counts, then time totals)."""
+    cellwise: Cellwise = {}
+    for source in sources:
+        loaded = np.load(source, allow_pickle=False)
+        cellwise.update({key: loaded[key] for key in loaded.files})
+    return cellwise
+
+
+def whole_time_points(cellwise: Cellwise, cells: np.ndarray) -> np.ndarray | None:
+    """Codes of the time points `cells` covers completely, or None if it covers any partially."""
+    if "time_codes" not in cellwise:
+        return None
+    codes = cellwise["time_codes"]
+    n_times = len(cellwise["time_names"])
+    covered = np.bincount(codes[cells], minlength=n_times)
+    sizes = np.bincount(codes, minlength=n_times)
+    if np.any((covered > 0) & (covered < sizes)):
+        return None
+    return np.flatnonzero(covered)
 
 
 def group_sums(
@@ -200,7 +226,10 @@ def fit_f_dist(variances: np.ndarray, df: float) -> tuple[float, float]:
 
 
 def replicate_test(
-    cellwise: Cellwise, selected: np.ndarray, reference: np.ndarray | None
+    cellwise: Cellwise,
+    selected: np.ndarray,
+    reference: np.ndarray | None,
+    times: np.ndarray | None = None,
 ) -> dict[str, object]:
     """Pseudobulk test across biological replicates.
 
@@ -209,6 +238,9 @@ def replicate_test(
     log-CPM: per gene, the selected-vs-reference log-CPM differences are tested against 0
     with a t statistic whose variance is shrunk towards a common prior (empirical Bayes).
     The variation it accounts for is between replicates, not between cells.
+
+    `times`, when given, are the whole time points selected + reference cover; the
+    reference pseudobulks are then their precomputed totals minus the selection.
     """
     n_genes = len(cellwise["genes"])
     if "replicate_codes" not in cellwise:
@@ -233,6 +265,8 @@ def replicate_test(
         sel_sum = pseudobulk_counts(cellwise, sel_cells)
         if reference is None:
             ref_sum = cellwise["replicate_counts"][code] - sel_sum
+        elif times is not None:
+            ref_sum = cellwise["time_replicate_counts"][times, code].sum(axis=0) - sel_sum
         else:
             ref_sum = pseudobulk_counts(cellwise, ref_cells)
         selected_counts.append(sel_sum)
@@ -327,7 +361,7 @@ def compare_cells(
     n_selected = len(selected)
     _check_group_size(n_selected, "selected")
 
-    ref_cells = None
+    ref_cells = times = None
     if reference is None:
         n_ref = n_cells - n_selected
         _check_group_size(n_ref, "reference")
@@ -350,9 +384,15 @@ def compare_cells(
         n_ref = len(ref_cells)
         _check_group_size(n_ref, "reference")
         sel_sum, sel_sq, sel_nnz = group_sums(cellwise, selected)
-        ref_sum, ref_sq, ref_nnz = group_sums(cellwise, ref_cells)
+        times = whole_time_points(cellwise, np.union1d(ref_cells, selected))
+        if times is not None:
+            ref_sum = cellwise["time_gene_sum"][times].sum(axis=0) - sel_sum
+            ref_sq = cellwise["time_gene_sumsq"][times].sum(axis=0) - sel_sq
+            ref_nnz = cellwise["time_gene_nnz"][times].sum(axis=0) - sel_nnz
+        else:
+            ref_sum, ref_sq, ref_nnz = group_sums(cellwise, ref_cells)
 
-    replicates = replicate_test(cellwise, selected, ref_cells)
+    replicates = replicate_test(cellwise, selected, ref_cells, times)
 
     mean_sel, var_sel = _mean_var(sel_sum, sel_sq, n_selected)
     mean_ref, var_ref = _mean_var(ref_sum, ref_sq, n_ref)

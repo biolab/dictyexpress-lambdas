@@ -8,7 +8,10 @@ cell-de lambda needs whole cells, so this rewrites it as a cell-wise CSR matrix
 (see core.py for the layout).
 
     python build_cellwise.py --input ../../../data/single_cell/AX4
-    # -> matrices/AX4.npz, then ../aws/upload_matrices.sh cell-de
+    # -> matrices/AX4.npz + matrices/AX4.times.npz, then ../aws/upload_matrices.sh cell-de
+
+    python build_cellwise.py --input ../../../data/single_cell/AX4 --times-only
+    # -> only matrices/AX4.times.npz, from the existing matrices/AX4.npz
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from time import perf_counter
 import numpy as np
 from scipy import sparse
 
-from core import TARGET_SUM, Cellwise, group_sums, pseudobulk_counts
+from core import TARGET_SUM, Cellwise, group_sums, load_cellwise, pseudobulk_counts
 
 GENE_BLOCK = 256
 UINT16_MAX = np.iinfo(np.uint16).max
@@ -110,6 +113,43 @@ def cellwise_from_csr(
     return cellwise
 
 
+def time_totals(cellwise: Cellwise, times: list[str]) -> Cellwise:
+    """Per time point gene_* and replicate_counts (cells/time.json of the strain folder)."""
+    n_cells = len(cellwise["indptr"]) - 1
+    if len(times) != n_cells:
+        raise ValueError("cells/time.json does not match the number of cells.")
+    names = sorted(set(times))
+    code_of = {name: code for code, name in enumerate(names)}
+    codes = np.array([code_of[time] for time in times], dtype=np.int8)
+
+    sums, sumsqs, nnzs, replicate_counts = [], [], [], []
+    for code in range(len(names)):
+        cells = np.flatnonzero(codes == code)
+        total, total_sq, nnz = group_sums(cellwise, cells)
+        sums.append(total)
+        sumsqs.append(total_sq)
+        nnzs.append(nnz)
+        if "replicate_codes" in cellwise:
+            replicate_codes = cellwise["replicate_codes"][cells]
+            replicate_counts.append(
+                [
+                    pseudobulk_counts(cellwise, cells[replicate_codes == replicate])
+                    for replicate in range(len(cellwise["replicate_names"]))
+                ]
+            )
+
+    totals: Cellwise = {
+        "time_names": np.asarray(names, dtype=str),
+        "time_codes": codes,
+        "time_gene_sum": np.array(sums),
+        "time_gene_sumsq": np.array(sumsqs),
+        "time_gene_nnz": np.array(nnzs),
+    }
+    if replicate_counts:
+        totals["time_replicate_counts"] = np.array(replicate_counts)
+    return totals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--input", required=True, type=Path, help="Strain folder (zarr output)")
@@ -117,21 +157,37 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "matrices",
-        help="Where to write <strain>.npz",
+        help="Where to write <strain>.npz and <strain>.times.npz",
+    )
+    parser.add_argument(
+        "--times-only",
+        action="store_true",
+        help="Only rebuild <strain>.times.npz, from the existing <strain>.npz",
     )
     args = parser.parse_args()
 
     strain = json.loads((args.input / "info.json").read_text())["strain"]
     started = perf_counter()
-    cellwise = build_cellwise(args.input)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     path = args.output_dir / f"{strain}.npz"
-    np.savez_compressed(path, **cellwise)
+    if args.times_only:
+        cellwise = load_cellwise(path)
+    else:
+        cellwise = build_cellwise(args.input)
+        np.savez_compressed(path, **cellwise)
+        print(
+            f"{strain}: {len(cellwise['indptr']) - 1} cells x {len(cellwise['genes'])} genes, "
+            f"{len(cellwise['counts'])} nonzero -> {path} "
+            f"({path.stat().st_size / 1e6:.0f} MB, {perf_counter() - started:.0f}s)"
+        )
+
+    times = json.loads((args.input / "cells" / "time.json").read_text())
+    times_path = args.output_dir / f"{strain}.times.npz"
+    totals = time_totals(cellwise, times)
+    np.savez_compressed(times_path, **totals)
     print(
-        f"{strain}: {len(cellwise['indptr']) - 1} cells x {len(cellwise['genes'])} genes, "
-        f"{len(cellwise['counts'])} nonzero -> {path} "
-        f"({path.stat().st_size / 1e6:.0f} MB, {perf_counter() - started:.0f}s)"
+        f"{strain}: {len(totals['time_names'])} time points -> {times_path} "
+        f"({times_path.stat().st_size / 1e6:.1f} MB)"
     )
 
 
