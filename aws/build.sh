@@ -22,11 +22,16 @@ if [ -s "${REQ}" ]; then
     --target "${BUILD_DIR}" -r "${REQ}"
 fi
 rm -f "${REQ}"
+# scipy's test suites never run in Lambda and would push the cell-de zip past
+# the 50 MB direct-upload limit. (Not numpy's: numpy.testing imports from them.)
+if [ -d "${BUILD_DIR}/scipy" ]; then
+  find "${BUILD_DIR}/scipy" -type d -name tests -prune -exec rm -rf {} +
+fi
 
-# Shared package + service source (exclude dev-only local_server.py).
+# Shared package + service source (exclude dev-only local_server.py and tests).
 cp -R "${REPO_ROOT}/common" "${BUILD_DIR}/common"
 for f in "${SERVICE_DIR}"/*.py; do
-  [ "$(basename "$f")" = "local_server.py" ] && continue
+  case "$(basename "$f")" in local_server.py | test_*.py) continue ;; esac
   cp "$f" "${BUILD_DIR}/"
 done
 
