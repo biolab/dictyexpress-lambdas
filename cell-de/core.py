@@ -46,6 +46,7 @@ points") is likewise the time point totals minus the selection.
 from __future__ import annotations
 
 import re
+from numbers import Real
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
@@ -70,6 +71,15 @@ MIN_REPLICATE_CELLS = 10
 MIN_REPLICATES = 2
 # Genes need this many counts in a pseudobulk sample of median size (edgeR filterByExpr).
 MIN_PSEUDOBULK_COUNT = 10
+# Test for changes larger than twofold by default (0 restores the zero-effect test).
+DEFAULT_MIN_LOG2_FOLD_CHANGE = 1.0
+
+
+def validate_min_log2_fold_change(value: object) -> float:
+    """Require a finite, non-negative numeric threshold in log2 units."""
+    if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value) or value < 0:
+        raise ValueError("'min_log2_fold_change' must be a finite, non-negative number.")
+    return float(value)
 
 
 def load_cellwise(*sources: Path | str | BinaryIO) -> Cellwise:
@@ -170,7 +180,7 @@ def _mean_var(total: np.ndarray, total_sq: np.ndarray, n: int) -> tuple[np.ndarr
 
 
 def log_t_sf(t: np.ndarray, df: np.ndarray) -> np.ndarray:
-    """log P(T > t) for t >= 0, without underflow.
+    """log P(T > t) for finite t, without underflow in the positive tail.
 
     scipy's t.logsf is log(sf), so it hits -inf once sf drops below ~1e-308, which
     thousands of cells reach easily. There, use the exact identity
@@ -211,6 +221,8 @@ def trigamma_inverse(y: np.ndarray | float) -> np.ndarray:
 
 def fit_f_dist(variances: np.ndarray, df: float) -> tuple[float, float]:
     """Prior (d0, s0^2) for the gene variances, as limma::fitFDist (eBayes, robust=FALSE)."""
+    if len(variances) == 1:
+        return 0.0, float(variances[0])
     x = np.maximum(variances, 0.0)
     median = np.median(x)
     x = np.maximum(x, 1e-5 * (median if median > 0 else 1.0))
@@ -221,7 +233,8 @@ def fit_f_dist(variances: np.ndarray, df: float) -> tuple[float, float]:
         d0 = 2.0 * float(trigamma_inverse(e_var)[0])
         s0_squared = float(np.exp(e_mean + special.digamma(d0 / 2.0) - np.log(d0 / 2.0)))
     else:
-        d0, s0_squared = np.inf, float(np.exp(e_mean))
+        # With no between-gene excess variation, limma pools the variances.
+        d0, s0_squared = np.inf, float(x.mean())
     return d0, s0_squared
 
 
@@ -230,21 +243,27 @@ def replicate_test(
     selected: np.ndarray,
     reference: np.ndarray | None,
     times: np.ndarray | None = None,
+    *,
+    min_log2_fold_change: float = DEFAULT_MIN_LOG2_FOLD_CHANGE,
 ) -> dict[str, object]:
     """Pseudobulk test across biological replicates.
 
     Per replicate, the raw counts of its selected and its reference cells are summed into
-    two pseudobulk samples. This is limma's paired design (~ replicate + group) on voom
-    log-CPM: per gene, the selected-vs-reference log-CPM differences are tested against 0
-    with a t statistic whose variance is shrunk towards a common prior (empirical Bayes).
+    two pseudobulk samples. This is limma's unweighted paired design (~ replicate + group)
+    on log-CPM, with empirical-Bayes variance moderation and the original TREAT test
+    (trend=False, robust=False; upshot=False in newer limma versions). The null is
+    |true log2 fold change| <= min_log2_fold_change; 0 gives the usual moderated t-test.
+    This uses the log-CPM transform without voom precision weights.
     The variation it accounts for is between replicates, not between cells.
 
     `times`, when given, are the whole time points selected + reference cover; the
     reference pseudobulks are then their precomputed totals minus the selection.
     """
+    min_log2_fold_change = validate_min_log2_fold_change(min_log2_fold_change)
+    metadata = {"method": "limma-treat", "min_log2_fold_change": min_log2_fold_change}
     n_genes = len(cellwise["genes"])
     if "replicate_codes" not in cellwise:
-        return {"status": "This strain has no replicate labels."}
+        return {**metadata, "status": "This strain has no replicate labels."}
     codes = cellwise["replicate_codes"]
     names = cellwise["replicate_names"]
     replicate_sizes = np.bincount(codes[codes >= 0], minlength=len(names))
@@ -275,6 +294,7 @@ def replicate_test(
     k = len(selected_counts)
     if k < MIN_REPLICATES:
         return {
+            **metadata,
             "status": f"Fewer than {MIN_REPLICATES} replicates have at least "
             f"{MIN_REPLICATE_CELLS} selected and {MIN_REPLICATE_CELLS} reference cells.",
             "replicates": replicates,
@@ -284,11 +304,18 @@ def replicate_test(
     reference_counts = np.array(reference_counts)
     samples = np.vstack([selected_counts, reference_counts])  # (2k, genes)
     libraries = samples.sum(axis=1, keepdims=True)
-    log_cpm = np.log2((samples + 0.5) / (libraries + 1.0) * 1e6)  # voom
+    log_cpm = np.log2((samples + 0.5) / (libraries + 1.0) * 1e6)
     # Keep genes expressed in at least k of the 2k samples (edgeR filterByExpr).
     cpm_cutoff = MIN_PSEUDOBULK_COUNT / np.median(libraries) * 1e6
     expressed = (samples / libraries * 1e6 >= cpm_cutoff).sum(axis=0) >= k
     kept = np.flatnonzero(expressed)
+    if not len(kept):
+        return {
+            **metadata,
+            "status": "No genes pass the pseudobulk expression filter.",
+            "replicates": replicates,
+            "n_genes_tested": 0,
+        }
 
     differences = (log_cpm[:k] - log_cpm[k:])[:, kept]
     mean_difference = differences.mean(axis=0)
@@ -301,9 +328,15 @@ def replicate_test(
     else:
         posterior = np.full_like(variances, s0_squared)
         df_total = df * len(kept)
-    t_stat = mean_difference / np.sqrt(posterior / k)
+    se = np.sqrt(posterior / k)
+    # Original limma::treat: both tails at the nearest boundary of the interval
+    # null. Do not clamp the right statistic before computing its probability:
+    # estimates inside the null interval must retain p-values above 0.5.
+    t_right = (np.abs(mean_difference) - min_log2_fold_change) / se
+    t_left = (np.abs(mean_difference) + min_log2_fold_change) / se
+    degrees = np.full_like(mean_difference, df_total)
     log_p = np.minimum(
-        np.log(2.0) + log_t_sf(np.abs(t_stat), np.full_like(t_stat, df_total)), 0.0
+        np.logaddexp(log_t_sf(t_right, degrees), log_t_sf(t_left, degrees)), 0.0
     )
 
     pvalue = np.full(n_genes, np.nan)
@@ -313,6 +346,7 @@ def replicate_test(
     fdr[kept] = benjamini_hochberg(np.exp(log_p))
     log2_fold_change[kept] = mean_difference
     return {
+        **metadata,
         "status": "ok",
         "replicates": replicates,
         "n_genes_tested": len(kept),
@@ -350,12 +384,15 @@ def compare_cells(
     cellwise: Cellwise,
     cells: Iterable[int],
     reference: Iterable[int] | None = None,
+    *,
+    min_log2_fold_change: float = DEFAULT_MIN_LOG2_FOLD_CHANGE,
 ) -> dict[str, np.ndarray | int]:
     """Test every gene: selected cells vs reference cells (default: all others).
 
     Selected cells are dropped from an explicit reference, so a caller can pass
     e.g. all cells of the same time points without excluding the selection.
     """
+    min_log2_fold_change = validate_min_log2_fold_change(min_log2_fold_change)
     n_cells = len(cellwise["indptr"]) - 1
     selected = parse_cells(cells, n_cells)
     n_selected = len(selected)
@@ -392,7 +429,9 @@ def compare_cells(
         else:
             ref_sum, ref_sq, ref_nnz = group_sums(cellwise, ref_cells)
 
-    replicates = replicate_test(cellwise, selected, ref_cells, times)
+    replicates = replicate_test(
+        cellwise, selected, ref_cells, times, min_log2_fold_change=min_log2_fold_change
+    )
 
     mean_sel, var_sel = _mean_var(sel_sum, sel_sq, n_selected)
     mean_ref, var_ref = _mean_var(ref_sum, ref_sq, n_ref)

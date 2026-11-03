@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
+import io
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from scipy import sparse, stats
@@ -293,6 +299,8 @@ def test_replicate_results_serialize_with_nulls(replicated):
     body = result_to_json(compare_cells(cellwise, marker_cells.tolist()))
 
     assert body["replicate_test"]["status"] == "ok"
+    assert body["replicate_test"]["method"] == "limma-treat"
+    assert body["replicate_test"]["min_log2_fold_change"] == 1.0
     assert len(body["replicate_pvalue"]) == 200
     assert all(v is None or isinstance(v, float) for v in body["replicate_fdr"])
     assert "pvalue" not in body["replicate_test"]
@@ -301,7 +309,7 @@ def test_replicate_results_serialize_with_nulls(replicated):
 def test_strain_without_replicates_says_so(dataset):
     cellwise, _ = dataset
     body = result_to_json(compare_cells(cellwise, range(60)))
-    assert body["replicate_test"] == {"status": "This strain has no replicate labels."}
+    assert body["replicate_test"]["status"] == "This strain has no replicate labels."
     assert "replicate_pvalue" not in body
 
 
@@ -333,3 +341,160 @@ def test_result_to_json_is_columnar(dataset):
     assert body["genes"][0] == "DDB_G0000000"
     assert len(body["pvalue"]) == len(body["genes"]) == 40
     assert all(isinstance(value, float) for value in body["log2_fold_change"])
+
+
+@pytest.fixture(scope="module", params=["heterogeneous", "homogeneous"])
+def limma_reference(request):
+    """Saved R/limma outputs, including finite and infinite prior degrees of freedom.
+
+    Distribute each input pseudobulk exactly over ten cells so the comparison
+    exercises aggregation, filtering, fitting and BH adjustment end to end.
+    """
+    fixture = json.loads((Path(__file__).parent / "fixtures/limma_reference.json").read_text())
+    case = fixture["cases"][request.param]
+    samples = np.asarray(case["counts"], dtype=np.int64)
+    counts = np.vstack([
+        np.tile(sample // 10, (10, 1)) + (np.arange(10)[:, None] < sample % 10)
+        for sample in samples
+    ])
+    k = len(samples) // 2
+    genes = np.array([f"gene{i}" for i in range(samples.shape[1])])
+    labels = np.repeat(list(range(k)) * 2, 10).astype(str)
+    cellwise = cellwise_from_csr(sparse.csr_matrix(counts), genes, genes, labels)
+    return cellwise, np.arange(k * 10), case["tests"]
+
+
+@pytest.mark.parametrize("test_index", [0, 1, 2])
+def test_matches_saved_r_limma(limma_reference, test_index):
+    cellwise, selected, expected_tests = limma_reference
+    expected = expected_tests[test_index]
+    result = compare_cells(
+        cellwise, selected, min_log2_fold_change=expected["min_log2_fold_change"]
+    )["replicate_test"]
+    for field in ("log2_fold_change", "pvalue", "fdr"):
+        np.testing.assert_allclose(
+            result[field], np.asarray(expected[field], dtype=float), rtol=1e-9, atol=1e-12
+        )
+    if expected["df_prior"] is None:
+        assert result["df_prior"] is None
+    else:
+        assert result["df_prior"] == pytest.approx(expected["df_prior"], rel=1e-9)
+    assert result["n_genes_tested"] == len(cellwise["genes"]) - 1
+
+
+def test_treat_rejects_small_effects_and_keeps_large_effects(limma_reference):
+    cellwise, selected, _ = limma_reference
+    zero = compare_cells(cellwise, selected, min_log2_fold_change=0)["replicate_test"]
+    treat = compare_cells(cellwise, selected)["replicate_test"]
+    # Both directions: precise small effects are significant only against zero.
+    assert np.all(zero["fdr"][:2] < 0.05)
+    assert np.all(treat["pvalue"][:2] > 0.5)
+    assert np.all(treat["fdr"][2:4] < 0.05)
+    assert np.all(np.abs(treat["log2_fold_change"][2:4]) > 1)
+    tested = np.isfinite(zero["pvalue"])
+    assert np.all(treat["pvalue"][tested] >= zero["pvalue"][tested])
+
+
+def test_treat_is_symmetric_when_groups_are_reversed(limma_reference):
+    cellwise, selected, _ = limma_reference
+    rest = np.arange(len(selected), len(cellwise["indptr"]) - 1)
+    forward = compare_cells(cellwise, selected)["replicate_test"]
+    reverse = compare_cells(cellwise, rest)["replicate_test"]
+    np.testing.assert_allclose(forward["pvalue"], reverse["pvalue"], rtol=1e-10)
+    np.testing.assert_allclose(forward["log2_fold_change"], -reverse["log2_fold_change"])
+
+
+@pytest.mark.parametrize("threshold", [-1, np.nan, np.inf, -np.inf, None, True, "1", [], {}])
+def test_invalid_minimum_fold_change_is_rejected(dataset, threshold):
+    cellwise, _ = dataset
+    with pytest.raises(ValueError, match="min_log2_fold_change"):
+        compare_cells(cellwise, range(60), min_log2_fold_change=threshold)
+
+
+def test_custom_threshold_is_reported_without_changing_cell_effects(replicated):
+    cellwise, selected = replicated
+    default = compare_cells(cellwise, selected)
+    custom = compare_cells(cellwise, selected, min_log2_fold_change=0.5)
+    body = result_to_json(custom)
+    assert body["replicate_test"]["min_log2_fold_change"] == 0.5
+    for field in ("cohens_d", "log2_fold_change", "pvalue", "fdr"):
+        np.testing.assert_array_equal(default[field], custom[field])
+
+
+@pytest.fixture(params=["local", "lambda"])
+def request_endpoint(request, monkeypatch, replicated):
+    """Exercise the HTTP adapters without network, AWS credentials or S3 access."""
+    cellwise, selected = replicated
+    if request.param == "local":
+        from local_server import CellDeHandler
+
+        def post(body):
+            handler = CellDeHandler.__new__(CellDeHandler)
+            payload = json.dumps(body).encode()
+            handler.path = "/cell-de"
+            handler.headers = {"Content-Length": str(len(payload))}
+            handler.rfile = io.BytesIO(payload)
+            handler.store = SimpleNamespace(get=lambda strain: cellwise)
+            response = []
+            handler.write_json = lambda status, result: response.extend([status, result])
+            handler.do_POST()
+            return response
+    else:
+        import boto3
+
+        monkeypatch.syspath_prepend(str(Path(__file__).parent.parent))
+        monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: None)
+        spec = importlib.util.spec_from_file_location(
+            "cell_de_handler_test", Path(__file__).with_name("handler.py")
+        )
+        handler = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(handler)
+        monkeypatch.setattr(handler, "load_strain", lambda strain: cellwise)
+
+        def post(body):
+            response = handler.lambda_handler(
+                {"httpMethod": "POST", "body": json.dumps(body)}, None
+            )
+            return response["statusCode"], json.loads(response["body"])
+
+    return post, {"strain": "AX4", "cells": selected.tolist()}
+
+
+@pytest.mark.parametrize(
+    "options, expected",
+    [({}, 1.0), ({"min_log2_fold_change": 0}, 0), ({"min_log2_fold_change": 0.5}, 0.5)],
+)
+def test_endpoints_apply_and_report_threshold(request_endpoint, options, expected, replicated):
+    post, body = request_endpoint
+    status, result = post({**body, **options})
+    assert status == 200
+    assert result["replicate_test"]["min_log2_fold_change"] == expected
+    cellwise, selected = replicated
+    direct = result_to_json(compare_cells(cellwise, selected, min_log2_fold_change=expected))
+    assert result["replicate_pvalue"] == direct["replicate_pvalue"]
+
+
+@pytest.mark.parametrize("threshold", [-1, None, "1", True])
+def test_endpoints_reject_invalid_thresholds(request_endpoint, threshold):
+    post, body = request_endpoint
+    status, result = post({**body, "min_log2_fold_change": threshold})
+    assert status == 400
+    assert "min_log2_fold_change" in result["error"]
+
+
+def test_fit_f_dist_with_one_gene_does_not_shrink():
+    assert fit_f_dist(np.array([0.25]), 3) == (0.0, 0.25)
+
+
+def test_replicate_test_reports_when_no_genes_pass_filter():
+    # Two total counts per pseudobulk: neither gene reaches the 10-count cutoff.
+    counts = np.zeros((40, 2))
+    counts[::10, 1] = 1
+    counts[1::10, 0] = 1
+    genes = np.array(["a", "b"])
+    cellwise = cellwise_from_csr(
+        sparse.csr_matrix(counts), genes, genes, np.repeat(["r1", "r2"], 20)
+    )
+    result = compare_cells(cellwise, list(range(10)) + list(range(20, 30)))
+    assert result["replicate_test"]["n_genes_tested"] == 0
+    assert result["replicate_test"]["status"] == "No genes pass the pseudobulk expression filter."

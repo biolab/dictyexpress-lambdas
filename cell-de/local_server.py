@@ -8,6 +8,7 @@ Exposes:
 
     POST http://localhost:8788/cell-de   {"strain": "AX4", "cells": [0, 5, ...]}
     (optional "reference": [...] cell indices; default all other cells)
+    (optional "min_log2_fold_change": 1; minimum effect for the replicate test)
 """
 
 from __future__ import annotations
@@ -29,11 +30,13 @@ from typing import Any  # noqa: E402
 from common.cache import LruCache  # noqa: E402
 
 from core import (  # noqa: E402
+    DEFAULT_MIN_LOG2_FOLD_CHANGE,
     STRAIN_PATTERN,
     Cellwise,
     compare_cells,
     load_cellwise,
     result_to_json,
+    validate_min_log2_fold_change,
 )
 
 
@@ -85,10 +88,14 @@ class CellDeHandler(BaseHTTPRequestHandler):
             if not STRAIN_PATTERN.match(strain):
                 raise ValueError(f"Invalid strain name: {strain!r}")
             reference = body.get("reference")
+            min_log2_fold_change = validate_min_log2_fold_change(
+                body.get("min_log2_fold_change", DEFAULT_MIN_LOG2_FOLD_CHANGE)
+            )
             result = compare_cells(
                 self.store.get(strain),
                 [int(c) for c in body["cells"]],
                 None if reference is None else [int(c) for c in reference],
+                min_log2_fold_change=min_log2_fold_change,
             )
             elapsed = perf_counter() - started
             print(f"OK strain={strain} n_selected={result['n_selected']} in {elapsed:.3f}s")
