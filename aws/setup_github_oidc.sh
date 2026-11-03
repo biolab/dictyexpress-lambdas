@@ -64,7 +64,10 @@ else
 fi
 
 # 3. Least-privilege deploy policy (update code+config on our functions only) -
-RESOURCES=$(printf '"arn:aws:lambda:%s:%s:function:%s",' "${AWS_REGION}" "${ACCOUNT_ID}" "${FUNCTIONS[@]}")
+RESOURCES=""
+for fn in "${FUNCTIONS[@]}"; do
+  RESOURCES+="\"arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${fn}\","
+done
 RESOURCES="[${RESOURCES%,}]"
 CODE_OBJECTS=$(printf '"arn:aws:s3:::%s/deploy/*",' "${CODE_BUCKETS[@]}")
 CODE_OBJECTS="[${CODE_OBJECTS%,}]"
