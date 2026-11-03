@@ -24,3 +24,19 @@ load_service() {
   BUILD_DIR="${AWS_DIR}/build/${SERVICE}"
   ZIP_PATH="${DIST_DIR}/${SERVICE}.zip"
 }
+
+# Sets CREATE_CODE_ARGS / UPDATE_CODE_ARGS for the Lambda package. Direct uploads
+# are capped at 50 MB and time out near that size on slow connections, so a
+# service with CODE_VIA_S3=true stages the zip in its BUCKET first.
+stage_code() {
+  if [ "${CODE_VIA_S3:-false}" = "true" ]; then
+    local key="deploy/${SERVICE}.zip"
+    echo "Staging ${ZIP_PATH} at s3://${BUCKET}/${key}..."
+    aws s3 cp "${ZIP_PATH}" "s3://${BUCKET}/${key}" --only-show-errors
+    CREATE_CODE_ARGS=(--code "S3Bucket=${BUCKET},S3Key=${key}")
+    UPDATE_CODE_ARGS=(--s3-bucket "${BUCKET}" --s3-key "${key}")
+  else
+    CREATE_CODE_ARGS=(--zip-file "fileb://${ZIP_PATH}")
+    UPDATE_CODE_ARGS=(--zip-file "fileb://${ZIP_PATH}")
+  fi
+}
