@@ -3,7 +3,8 @@
 # Creates (idempotently):
 #   1. an IAM OIDC identity provider for GitHub Actions (if absent),
 #   2. an IAM role the repo's `main` workflows can assume,
-#   3. a least-privilege policy: update code+config on the lambda functions only.
+#   3. a least-privilege policy: update code+config on the lambda functions, and
+#      stage code zips under deploy/ in the services' buckets (CODE_VIA_S3).
 #
 # Run once with admin-ish AWS credentials. Then set the printed ARN as the GitHub
 # repository VARIABLE `AWS_DEPLOY_ROLE_ARN` (Settings > Secrets and variables >
@@ -20,7 +21,9 @@ OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_HOST}"
 ROLE_NAME="${DEPLOY_ROLE_NAME:-github-actions-lambda-deploy}"
 
 # Functions this role may update. Add new services here as you create them.
-FUNCTIONS=("fast-find-similar" "dicty-go")
+FUNCTIONS=("fast-find-similar" "dicty-go" "cell-de")
+# Buckets of services with CODE_VIA_S3=true; the role may write their deploy/ prefix.
+CODE_BUCKETS=("biolab-cell-de-us-east-1")
 
 echo "Account ${ACCOUNT_ID} | repo ${GH_REPO} | role ${ROLE_NAME}"
 
@@ -63,11 +66,18 @@ fi
 # 3. Least-privilege deploy policy (update code+config on our functions only) -
 RESOURCES=$(printf '"arn:aws:lambda:%s:%s:function:%s",' "${AWS_REGION}" "${ACCOUNT_ID}" "${FUNCTIONS[@]}")
 RESOURCES="[${RESOURCES%,}]"
+CODE_OBJECTS=$(printf '"arn:aws:s3:::%s/deploy/*",' "${CODE_BUCKETS[@]}")
+CODE_OBJECTS="[${CODE_OBJECTS%,}]"
+# Lambda reads an S3 code zip with the caller's permissions, hence GetObject.
 PERMS=$(cat <<JSON
 {"Version":"2012-10-17","Statement":[{
   "Effect":"Allow",
   "Action":["lambda:GetFunction","lambda:GetFunctionConfiguration","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration"],
   "Resource":${RESOURCES}
+},{
+  "Effect":"Allow",
+  "Action":["s3:PutObject","s3:GetObject","s3:AbortMultipartUpload"],
+  "Resource":${CODE_OBJECTS}
 }]}
 JSON
 )
@@ -83,4 +93,6 @@ echo
 echo "GitHub: Settings > Secrets and variables > Actions > Variables > New"
 echo "Scope: only repo ${GH_REPO} @ main can assume it; can only update code on:"
 printf '  - %s\n' "${FUNCTIONS[@]}"
+echo "and stage code zips in:"
+printf '  - s3://%s/deploy/\n' "${CODE_BUCKETS[@]}"
 echo "=================================================================="

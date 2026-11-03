@@ -59,8 +59,12 @@ No Docker.
 ## Continuous deployment (GitHub Actions)
 
 Pushes to `main` auto-deploy via `.github/workflows/deploy.yml`, using **GitHub
-OIDC** — no AWS keys are stored in GitHub. The workflow only updates function
-code+config (`aws/update_code.sh`); infra is provisioned once with `deploy.sh`.
+OIDC** — no AWS keys are stored in GitHub. Each service whose folder changed is
+tested (`pytest`, if it has tests) and then deployed; changes to `common/` or
+`aws/` deploy all of them. The workflow only updates function code+config
+(`aws/update_code.sh`); infra is provisioned once with `deploy.sh`, and data
+(e.g. cell-de's strain files) is uploaded with `upload_matrices.sh`. A new
+service goes in the workflow's `deployable` list and `setup_github_oidc.sh`.
 
 One-time connection (run locally with admin AWS creds):
 

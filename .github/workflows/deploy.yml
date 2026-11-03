@@ -2,14 +2,16 @@ name: Deploy lambda
 
 # Keyless deploy via GitHub OIDC -> an AWS IAM role (no AWS secrets stored in
 # GitHub). Set repository variable AWS_DEPLOY_ROLE_ARN to the role created by
-# aws/setup_github_oidc.sh. Infra (S3/IAM/API Gateway) is provisioned once with
-# aws/deploy.sh; this workflow only updates function code+config (update_code.sh).
+# aws/setup_github_oidc.sh. Infra (S3/IAM/API Gateway) and data are provisioned
+# with aws/deploy.sh and aws/upload_matrices.sh; this workflow only updates
+# function code+config (update_code.sh), after the service's tests pass.
 
 on:
   push:
     branches: [main]
     paths:
       - 'find-similar/**'
+      - 'cell-de/**'
       - 'common/**'
       - 'aws/**'
       - '.github/workflows/deploy.yml'
@@ -20,7 +22,8 @@ on:
         type: choice
         options:
           - find-similar
-          # - go        # uncomment once the GO lambda is provisioned
+          - cell-de
+          # - go        # add once the GO lambda is provisioned
         default: find-similar
 
 permissions:
@@ -28,14 +31,66 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.pick.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A push deploys the services whose folder changed; shared code (common/,
+      # aws/, this workflow) deploys them all.
+      - id: pick
+        shell: bash
+        env:
+          SERVICE: ${{ inputs.service }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # Services provisioned in AWS (aws/deploy.sh). Add GO once it is.
+          deployable="find-similar cell-de"
+          if [ -n "${SERVICE}" ]; then
+            services="${SERVICE}"
+          else
+            if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then base="${BEFORE}"; else base="HEAD~1"; fi
+            changed=$(git diff --name-only "${base}" HEAD)
+            if echo "${changed}" | grep -qE '^(common|aws|\.github)/'; then
+              services="${deployable}"
+            else
+              services=""
+              for s in ${deployable}; do
+                if echo "${changed}" | grep -q "^${s}/"; then services="${services} ${s}"; fi
+              done
+            fi
+          fi
+          echo "Deploying:${services:- nothing}"
+          echo "services=$(echo ${services} | jq -R -c 'split(" ") | map(select(length > 0))')" >> "${GITHUB_OUTPUT}"
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Test
+        working-directory: ${{ matrix.service }}
+        run: |
+          if ls test_*.py >/dev/null 2>&1; then
+            pip install -r requirements.txt pytest mpmath
+            python -m pytest -q
+          else
+            echo "No tests for ${{ matrix.service }}."
+          fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -44,4 +99,4 @@ jobs:
           aws-region: us-east-1
 
       - name: Update lambda code
-        run: ./aws/update_code.sh "${{ inputs.service || 'find-similar' }}"
+        run: ./aws/update_code.sh "${{ matrix.service }}"
