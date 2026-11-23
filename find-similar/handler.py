@@ -21,8 +21,8 @@ from common.http import (
 )
 from common.resolwe import ResolweError
 
-from build_resolwe import build_matrix_from_resolwe
-from core import compute_distances, load_npz_matrix
+from build_resolwe import build_matrix_from_resolwe, build_samples_from_resolwe
+from core import compute_distances, load_npz_matrix, select_samples_genes
 
 
 S3 = boto3.client("s3")
@@ -33,8 +33,8 @@ RESULT_LIMIT = int(os.environ.get("FIND_SIMILAR_TOP_N", "0")) or None
 MATRIX_CACHE = LruCache(CACHE_MB * 1024 * 1024)
 
 
-def _matrix_key(time_series_id: int) -> str:
-    prefix = os.environ.get("MATRIX_PREFIX", "matrices").strip("/")
+def _s3_key(time_series_id: int, prefix: str | None = None) -> str:
+    prefix = (prefix or os.environ.get("MATRIX_PREFIX", "matrices")).strip("/")
     return f"{prefix}/{time_series_id}.npz"
 
 
@@ -45,28 +45,46 @@ def _persist_matrix(bucket: str, key: str, matrix: dict[str, np.ndarray]) -> Non
     S3.put_object(Bucket=bucket, Key=key, Body=buffer.getvalue())
 
 
-def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.ndarray]:
-    """Resolve a matrix: warm-LRU -> S3 -> lazy build from Resolwe (then persist)."""
-    cached = MATRIX_CACHE.get(time_series_id)
+def _load_artifact(cache_key: Any, key: str, load, build) -> dict[str, np.ndarray]:
+    """Resolve an artifact: warm-LRU -> S3 -> lazy build from Resolwe (then persist)."""
+    cached = MATRIX_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     bucket = os.environ["MATRIX_BUCKET"]
-    key = _matrix_key(time_series_id)
-
     try:
         obj = S3.get_object(Bucket=bucket, Key=key)
-        matrix = load_npz_matrix(io.BytesIO(obj["Body"].read()))
+        artifact = load(io.BytesIO(obj["Body"].read()))
     except ClientError as error:
         if error.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
             raise
         # Not in S3 yet: build it from Resolwe on demand, then cache to S3 so
         # this dataset (and any new dataset) is fast on every later request.
-        matrix = build_matrix_from_resolwe(time_series_id, expression_ids)
-        _persist_matrix(bucket, key, matrix)
+        artifact = build()
+        _persist_matrix(bucket, key, artifact)
 
-    MATRIX_CACHE.put(time_series_id, matrix)
-    return matrix
+    MATRIX_CACHE.put(cache_key, artifact)
+    return artifact
+
+
+def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.ndarray]:
+    """Find-similar matrix (genes x time points, replicate-averaged)."""
+    return _load_artifact(
+        time_series_id,
+        _s3_key(time_series_id),
+        load_npz_matrix,
+        lambda: build_matrix_from_resolwe(time_series_id, expression_ids),
+    )
+
+
+def load_samples(time_series_id: int) -> dict[str, np.ndarray]:
+    """Time-course artifact (samples x genes, as stored in Resolwe)."""
+    return _load_artifact(
+        ("samples", time_series_id),
+        _s3_key(time_series_id, os.environ.get("SAMPLES_PREFIX", "samples")),
+        lambda f: dict(np.load(f, allow_pickle=False)),
+        lambda: build_samples_from_resolwe(time_series_id),
+    )
 
 
 def _preload() -> None:
@@ -108,6 +126,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         body = parse_body(event)
         time_series_id = int(body["time_series"])
+
+        # Expression time courses
+        if "genes" in body:
+            genes = [str(gene) for gene in body["genes"]]
+            print(f"REQ samples time_series={time_series_id} n_genes={len(genes)}")
+            samples = select_samples_genes(load_samples(time_series_id), genes)
+            return response(200, {"samples": samples}, origin, allow_headers)
+
         gene = str(body["gene"])
         distance = str(body.get("distance", "spearman"))
 

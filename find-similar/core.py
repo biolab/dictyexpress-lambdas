@@ -89,3 +89,36 @@ def compute_distances(
         {"gene": str(result_gene), "distance": float(result_distance)}
         for result_gene, result_distance in zip(result_genes, result_distances)
     ]
+
+
+def build_samples_arrays(samples: list[tuple[int, dict[str, float]]]) -> Matrix:
+    """Stack per-sample {gene: value} vectors into a samples x genes artifact."""
+    genes = np.array(sorted({gene for _, values in samples for gene in values}), dtype=str)
+    index = {gene: i for i, gene in enumerate(genes)}
+    values = np.full((len(samples), len(genes)), np.nan, dtype=np.float64)
+    for row, (_, sample_values) in enumerate(samples):
+        for gene, value in sample_values.items():
+            values[row, index[gene]] = value
+    return {
+        "samples": np.array([entity for entity, _ in samples], dtype=np.int64),
+        "genes": genes,
+        "values": values,
+    }
+
+
+def select_samples_genes(artifact: Matrix, genes: list[str]) -> dict[str, dict[str, float]]:
+    """Return {sample id: {gene: value}} for the requested genes that exist."""
+    positions = np.searchsorted(artifact["genes"], genes)
+    found = [
+        (gene, int(position))
+        for gene, position in zip(genes, positions)
+        if position < len(artifact["genes"]) and artifact["genes"][position] == gene
+    ]
+    result: dict[str, dict[str, float]] = {}
+    for row, sample in enumerate(artifact["samples"]):
+        result[str(int(sample))] = {
+            gene: float(artifact["values"][row, column])
+            for gene, column in found
+            if not np.isnan(artifact["values"][row, column])
+        }
+    return result
