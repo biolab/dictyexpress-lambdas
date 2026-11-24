@@ -116,22 +116,38 @@ the h5ad's `obs["marker"]`: the separately grown fluorescent lines of AX4 and
 acaA-, the r1-r3 libraries of acaA-pkaC). Rebuild with `build_cellwise.py` after
 adding it.
 
-Request `{"strain": "AX4", "cells": [...], "reference": [...]}` (`reference`
-optional). The response is columnar, one list per field aligned with `genes`:
+Request `{"strain": "AX4", "cells": [...], "reference": [...], "min_log2_fold_change": 1}`.
+`reference` is optional. `min_log2_fold_change` is a finite, non-negative number
+(default **1**, a twofold change); **0** restores the zero-effect moderated t-test.
+The response is columnar, one list per field aligned with `genes`:
 
 - `log2_fold_change`, `cohens_d`: the marker ranking (log1p of counts scaled to
   10k per cell; d with the SD averaged over both groups, as in scran).
 - `replicate_pvalue`, `replicate_fdr`, `replicate_log2_fold_change`: pseudobulk
-  test across replicates (limma paired design on voom log-CPM with empirical
-  Bayes, matching limma to ~1e-14); `null` for genes too lowly expressed to test.
+  TREAT test on log-CPM pseudobulks, paired by replicate, with empirical-Bayes
+  variance moderation. It tests whether the absolute true **pseudobulk** log2 fold
+  change exceeds `min_log2_fold_change`, using the original limma TREAT calculation
+  (`trend=FALSE`, `robust=FALSE`, `upshot=FALSE` in newer limma). No voom precision
+  weights are used. BH adjustment is over the genes passing the expression filter;
+  untested genes are `null`. The threshold is part of the hypothesis, not a filter
+  on the observed effect, and does not change the cell-level effect-size ranking.
   `replicate_test` says whether it ran (it needs 2 replicates with 10 selected
-  and 10 reference cells each) and which replicates it used.
+  and 10 reference cells each), which replicates it used, its `method`, and the
+  applied `min_log2_fold_change`.
 - `t`, `pvalue`, `neg_log10_pvalue`, `fdr`, `neg_log10_fdr`: scanpy's
   `t-test_overestim_var` over cells. Cells aren't independent replicates, so
   these are far too small (often < 1e-1000); kept only for reference.
 
 The cells are chosen by looking at the same data, so even the replicate
-p-values are exploratory.
+p-values are exploratory. TREAT does not correct this selection bias, including
+selection using cell-type labels derived from the same expression data.
+
+Regression tests compare coefficients, p-values and BH-adjusted p-values with
+saved R 4.4.1 / limma 3.60.6 outputs at thresholds 0, 0.5 and 1, for both finite
+and infinite prior degrees of freedom (tolerances `rtol=1e-9`, `atol=1e-12`).
+Inputs, outputs and the generating script are in `cell-de/fixtures/`; regenerate
+from `cell-de` with `Rscript fixtures/generate_limma_reference.R`. R is needed
+only to regenerate the fixture, not to run the service or Python tests.
 
 Deploy: `cd aws && ./deploy.sh cell-de && ./upload_matrices.sh cell-de`, then
 `./cloudfront_attach.sh cell-de <api-id>`.

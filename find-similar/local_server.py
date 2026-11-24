@@ -35,8 +35,13 @@ import numpy as np  # noqa: E402
 from common.cache import LruCache  # noqa: E402
 from common.resolwe import ResolweError  # noqa: E402
 
-from build_resolwe import build_matrix_from_resolwe  # noqa: E402
-from core import Matrix, compute_distances, load_npz_matrix  # noqa: E402
+from build_resolwe import build_matrix_from_resolwe, build_samples_from_resolwe  # noqa: E402
+from core import (  # noqa: E402
+    Matrix,
+    compute_distances,
+    load_npz_matrix,
+    select_samples_genes,
+)
 
 
 class MatrixStore:
@@ -60,6 +65,23 @@ class MatrixStore:
 
         self.cache.put(time_series_id, matrix)
         return matrix
+
+    def get_samples(self, time_series_id: int) -> Matrix:
+        """Time-course artifact: LRU memory -> disk (samples/) -> lazy build."""
+        cached = self.cache.get(("samples", time_series_id))
+        if cached is not None:
+            return cached
+
+        path = self.matrix_dir.parent / "samples" / f"{time_series_id}.npz"
+        if path.exists():
+            artifact = dict(np.load(path, allow_pickle=False))
+        else:
+            artifact = build_samples_from_resolwe(time_series_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(path, **artifact)
+            print(f"Built and cached samples for time series {time_series_id} -> {path}")
+        self.cache.put(("samples", time_series_id), artifact)
+        return artifact
 
     def _build_and_persist(
         self, time_series_id: int, expression_ids: list[int], path: Path
@@ -98,6 +120,17 @@ class FindSimilarHandler(BaseHTTPRequestHandler):
             body = self.read_json_body()
             started = perf_counter()
             time_series_id = int(body["time_series"])
+            if "genes" in body:
+                genes = [str(gene) for gene in body["genes"]]
+                artifact = self.matrix_store.get_samples(time_series_id)
+                samples = select_samples_genes(artifact, genes)
+                print(
+                    f"OK samples time_series={time_series_id} n_genes={len(genes)} "
+                    f"in {perf_counter() - started:.3f}s"
+                )
+                self.write_json(200, {"samples": samples})
+                return
+
             gene = str(body["gene"])
             distance = str(body.get("distance", "spearman"))
             expression_ids = [int(i) for i in body.get("expressions", [])]

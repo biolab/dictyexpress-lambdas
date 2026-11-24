@@ -17,26 +17,31 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from common.resolwe import ResolweError, get_data, get_relation, get_storage
+from common.resolwe import (
+    ResolweError,
+    expression_data_ids_for_relation,
+    get_data,
+    get_relation,
+    get_storage,
+)
 
 from build_matrix import build_matrix_arrays
+from core import build_samples_arrays
 
 
 class LazyBuildUnavailable(ResolweError):
     """A matrix is missing and cannot be built on demand from the request."""
 
 
-def build_matrix_from_resolwe(
+def fetch_samples(
     time_series_id: int, expression_ids: list[int]
-) -> dict[str, np.ndarray]:
-    """Fetch relation + per-sample expression vectors and build the matrix."""
+) -> list[tuple[int, dict[str, float]]]:
+    """Fetch each sample's expression vector as (entity id, {gene: value})."""
     if not expression_ids:
         raise LazyBuildUnavailable(
             f"Cannot build matrix for time series {time_series_id}: "
             "request did not include any expression ids."
         )
-
-    relation = get_relation(time_series_id)
 
     # Each expression Data object carries its sample (`entity`) and a storage id
     # (`output.exp_json`) holding the gene->value mapping.
@@ -65,5 +70,19 @@ def build_matrix_from_resolwe(
         raise LazyBuildUnavailable(
             f"Could not assemble any expression samples for time series {time_series_id}."
         )
+    return samples
 
-    return build_matrix_arrays(relation, samples)
+
+def build_matrix_from_resolwe(
+    time_series_id: int, expression_ids: list[int]
+) -> dict[str, np.ndarray]:
+    """Fetch relation + per-sample expression vectors and build the matrix."""
+    samples = fetch_samples(time_series_id, expression_ids)
+    return build_matrix_arrays(get_relation(time_series_id), samples)
+
+
+def build_samples_from_resolwe(time_series_id: int) -> dict[str, np.ndarray]:
+    """Fetch every sample of a time series for the expression time courses."""
+    relation = get_relation(time_series_id)
+    samples = fetch_samples(time_series_id, expression_data_ids_for_relation(relation))
+    return build_samples_arrays(samples)

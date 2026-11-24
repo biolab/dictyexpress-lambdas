@@ -1,7 +1,7 @@
 """AWS Lambda handler: differential expression of selected cells vs a reference.
 
 Request:  {"strain": "AX4", "cells": [...], "reference": [...]}  (reference optional;
-          omitted = all other cells of the strain)
+          omitted = all other cells of the strain); optional min_log2_fold_change (default 1)
 """
 
 from __future__ import annotations
@@ -26,7 +26,15 @@ from common.http import (
     response,
 )
 
-from core import STRAIN_PATTERN, Cellwise, compare_cells, load_cellwise, result_to_json
+from core import (
+    DEFAULT_MIN_LOG2_FOLD_CHANGE,
+    STRAIN_PATTERN,
+    Cellwise,
+    compare_cells,
+    load_cellwise,
+    result_to_json,
+    validate_min_log2_fold_change,
+)
 
 
 # A strain's artifact is ~0.5 GB in memory; the cap decides how many stay warm.
@@ -140,12 +148,17 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         reference = body.get("reference")
         if reference is not None:
             reference = _cell_indices(reference, "reference")
+        min_log2_fold_change = validate_min_log2_fold_change(
+            body.get("min_log2_fold_change", DEFAULT_MIN_LOG2_FOLD_CHANGE)
+        )
 
         print(
             f"REQ strain={strain} n_cells={len(cells)} "
             f"n_reference={'rest' if reference is None else len(reference)}"
         )
-        result = compare_cells(load_strain(strain), cells, reference)
+        result = compare_cells(
+            load_strain(strain), cells, reference, min_log2_fold_change=min_log2_fold_change
+        )
         body = result_to_json(result)
         body["strain"] = strain
         return response(200, body, origin, allow_headers)
