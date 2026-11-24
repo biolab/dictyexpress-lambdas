@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Pre-build a matrix for every bcm time series and upload to S3.
+"""Pre-build the matrix and samples artifacts for every bcm time series, upload to S3.
 
 Pre-seeding S3 means users never trigger a (multi-second) on-demand build — a
 cache miss becomes a fast S3 fetch. Matrices are built with the exact same code
-path as the lazy build, so artifacts are identical.
+path as the lazy build, so artifacts are identical. The samples artifacts
+(samples x genes, for the expression time courses) go to samples/<id>.npz.
 
 Run from the find-similar directory:
 
@@ -30,19 +31,21 @@ from common.resolwe import (  # noqa: E402
     list_time_series,
 )
 
-from build_resolwe import build_matrix_from_resolwe  # noqa: E402
+from build_resolwe import build_matrix_from_resolwe, build_samples_from_resolwe  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MATRIX_DIR = os.path.join(HERE, "matrices")
+SAMPLES_DIR = os.path.join(HERE, "samples")
 BUCKET = os.environ.get("MATRIX_BUCKET", "biolab-fast-find-similar-us-east-1")
 PREFIX = os.environ.get("MATRIX_PREFIX", "matrices")
+SAMPLES_PREFIX = os.environ.get("SAMPLES_PREFIX", "samples")
 
 
-def existing_s3_ids() -> set[int]:
-    """Time-series ids already present as matrices/<id>.npz in S3."""
+def existing_s3_ids(prefix: str) -> set[int]:
+    """Time-series ids already present as <prefix>/<id>.npz in S3."""
     try:
         out = subprocess.check_output(
-            ["aws", "s3", "ls", f"s3://{BUCKET}/{PREFIX}/"], text=True
+            ["aws", "s3", "ls", f"s3://{BUCKET}/{prefix}/"], text=True
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return set()
@@ -65,25 +68,39 @@ def main() -> None:
     args = parser.parse_args()
 
     os.makedirs(MATRIX_DIR, exist_ok=True)
+    os.makedirs(SAMPLES_DIR, exist_ok=True)
     relations = sorted(list_time_series(args.community), key=lambda r: r["id"])
-    in_s3 = set() if args.force else existing_s3_ids()
-    print(f"{len(relations)} time series in community:{args.community}; {len(in_s3)} already in S3")
+    in_s3 = set() if args.force else existing_s3_ids(PREFIX)
+    samples_in_s3 = set() if args.force else existing_s3_ids(SAMPLES_PREFIX)
+    print(
+        f"{len(relations)} time series in community:{args.community}; "
+        f"{len(in_s3)} matrices and {len(samples_in_s3)} samples already in S3"
+    )
 
     built, skipped, failed = [], [], []
     for relation in relations:
         rid = int(relation["id"])
-        if rid in in_s3:
+        need_matrix = rid not in in_s3
+        need_samples = rid not in samples_in_s3
+        if not need_matrix and not need_samples:
             skipped.append(rid)
             continue
 
         started = time.perf_counter()
         try:
-            expr_ids = expression_data_ids_for_relation(relation)
-            matrix = build_matrix_from_resolwe(rid, expr_ids)
-            np.savez_compressed(os.path.join(MATRIX_DIR, f"{rid}.npz"), **matrix)
-            g, t = matrix["expression"].shape
-            print(f"[ok]   {rid}: {g} genes x {t} tp, {len(expr_ids)} samples, "
-                  f"{time.perf_counter() - started:.1f}s")
+            parts = []
+            if need_matrix:
+                expr_ids = expression_data_ids_for_relation(relation)
+                matrix = build_matrix_from_resolwe(rid, expr_ids)
+                np.savez_compressed(os.path.join(MATRIX_DIR, f"{rid}.npz"), **matrix)
+                g, t = matrix["expression"].shape
+                parts.append(f"matrix {g} genes x {t} tp from {len(expr_ids)} samples")
+            if need_samples:
+                samples = build_samples_from_resolwe(rid)
+                np.savez_compressed(os.path.join(SAMPLES_DIR, f"{rid}.npz"), **samples)
+                s, g = samples["values"].shape
+                parts.append(f"samples {s} x {g} genes")
+            print(f"[ok]   {rid}: {'; '.join(parts)}, {time.perf_counter() - started:.1f}s")
             built.append(rid)
         except Exception as error:  # noqa: BLE001 - report and continue
             print(f"[FAIL] {rid}: {type(error).__name__}: {error}")
@@ -94,7 +111,7 @@ def main() -> None:
         print(f"  FAIL {rid}: {error}")
 
     if not args.no_upload and built:
-        print("\nSyncing matrices to S3...")
+        print("\nSyncing matrices and samples to S3...")
         subprocess.run([os.path.join(HERE, "..", "aws", "upload_matrices.sh")], check=False)
 
 

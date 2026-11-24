@@ -18,3 +18,12 @@ aws s3 sync "${SERVICE_DIR}/matrices/" "s3://${MATRIX_BUCKET}/${MATRIX_PREFIX}/"
 echo
 echo "Objects in s3://${MATRIX_BUCKET}/${MATRIX_PREFIX}/:"
 aws s3 ls "s3://${MATRIX_BUCKET}/${MATRIX_PREFIX}/"
+
+# find-similar also serves per-sample expressions (time courses) from samples/.
+if [ -d "${SERVICE_DIR}/samples" ]; then
+  SAMPLES_PREFIX="${SAMPLES_PREFIX:-samples}"
+  echo
+  echo "Syncing ${SERVICE_DIR}/samples/*.npz -> s3://${MATRIX_BUCKET}/${SAMPLES_PREFIX}/"
+  aws s3 sync "${SERVICE_DIR}/samples/" "s3://${MATRIX_BUCKET}/${SAMPLES_PREFIX}/" \
+    --exclude "*" --include "*.npz"
+fi
