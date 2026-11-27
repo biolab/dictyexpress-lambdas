@@ -151,3 +151,7 @@ only to regenerate the fixture, not to run the service or Python tests.
 
 Deploy: `cd aws && ./deploy.sh cell-de && ./upload_matrices.sh cell-de`, then
 `./cloudfront_attach.sh cell-de <api-id>`.
+
+## License
+
+Apache License 2.0, as for the dictyExpress front end. See [LICENSE](LICENSE).
