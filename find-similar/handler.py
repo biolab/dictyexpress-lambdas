@@ -21,7 +21,11 @@ from common.http import (
 )
 from common.resolwe import ResolweError
 
-from build_resolwe import build_matrix_from_resolwe, build_samples_from_resolwe
+from build_resolwe import (
+    LazyBuildUnavailable,
+    build_matrix_from_resolwe,
+    build_samples_from_resolwe,
+)
 from core import compute_distances, load_npz_matrix, select_samples_genes
 
 
@@ -77,32 +81,45 @@ def load_matrix(time_series_id: int, expression_ids: list[int]) -> dict[str, np.
     )
 
 
-def load_samples(time_series_id: int) -> dict[str, np.ndarray]:
-    """Time-course artifact (samples x genes, as stored in Resolwe)."""
+def load_samples(time_series_id: int, build: bool = True) -> dict[str, np.ndarray]:
+    """Time-course artifact (samples x genes, as stored in Resolwe).
+
+    With build=False a missing artifact raises instead of being built from
+    Resolwe (the cold-start preload must not run a slow build during init).
+    """
+
+    def build_or_fail() -> dict[str, np.ndarray]:
+        if not build:
+            raise LazyBuildUnavailable(f"No samples artifact in S3 for {time_series_id}.")
+        return build_samples_from_resolwe(time_series_id)
+
     return _load_artifact(
         ("samples", time_series_id),
         _s3_key(time_series_id, os.environ.get("SAMPLES_PREFIX", "samples")),
         lambda f: dict(np.load(f, allow_pickle=False)),
-        lambda: build_samples_from_resolwe(time_series_id),
+        build_or_fail,
     )
 
 
 def _preload() -> None:
-    """Load the default dataset into the cache at cold start.
+    """Load the default dataset's matrix and samples into the cache at cold start.
 
     Every user lands on the default time series first, so warming it during init
-    means that common request is served instantly instead of paying an S3 fetch.
+    means its find-similar and time-course requests are served instantly instead
+    of paying an S3 fetch.
     Best-effort: any failure (missing matrix, no creds) is logged and ignored.
     """
     raw = os.environ.get("PRELOAD_TIME_SERIES", "").strip()
     if not raw:
         return
     for token in raw.replace(",", " ").split():
-        try:
-            load_matrix(int(token), [])
-            print(f"preloaded matrix {token}")
-        except Exception as error:  # noqa: BLE001
-            print(f"preload skipped for {token}: {type(error).__name__}: {error}")
+        for name, load in (("matrix", lambda: load_matrix(int(token), [])),
+                           ("samples", lambda: load_samples(int(token), build=False))):
+            try:
+                load()
+                print(f"preloaded {name} {token}")
+            except Exception as error:  # noqa: BLE001
+                print(f"preload {name} skipped for {token}: {type(error).__name__}: {error}")
 
 
 _preload()
